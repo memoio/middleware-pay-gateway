@@ -279,6 +279,10 @@ func (l *lfsGateway) QueryPrice(ctx context.Context, bucket, size, time string) 
 	stime := new(big.Int)
 	stime.SetString(time, 10)
 
+	if stime.Cmp(big.NewInt(86400)) < 0 {
+		return "", xerrors.New("Minimum storage time of 100 days")
+	}
+
 	bi, err := l.memofs.GetBucketInfo(ctx, bucket)
 	if err != nil {
 		return "", err
@@ -363,7 +367,9 @@ func (l *lfsGateway) GetBucketPolicy(ctx context.Context, bucket string) (*polic
 				policy.NewPrincipal("*"),
 				policy.NewActionSet(
 					policy.GetObjectAction,
-					//policy.ListBucketAction,
+					policy.PutObjectAction,
+
+					policy.ListBucketAction,
 				),
 				policy.NewResourceSet(
 					policy.NewResource(bucket, ""),
@@ -585,6 +591,10 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	log.Println(signmsg)
 
 	date := opts.UserDefined["X-Amz-Meta-Date"]
+	if date == "" {
+		return objInfo, minio.ObjectValidationFailed{Bucket: bucket, Object: object}
+	}
+	log.Println(date)
 
 	putOpts := miniogo.PutObjectOptions{
 		UserMetadata:         opts.UserDefined,
@@ -620,7 +630,7 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 		l.memofs.DeleteObject(ctx, bucket, object)
 		return objInfo, err
 	}
-
+	log.Println("Price", price)
 	if allowance.Cmp(pri) < 0 {
 		log.Printf("allow: %d, price: %d, allowance not enough\n", allowance, pri)
 		l.memofs.DeleteObject(ctx, bucket, object)
