@@ -47,7 +47,9 @@ import (
 )
 
 var (
-	ENDPOINT string
+	ENDPOINT         string
+	GatewayAddr      = common.HexToAddress("0x31e7829Ea2054fDF4BCB921eDD3a98a825242267")
+	GatewaySecretKey = "0x8a87053d296a0f0b4600173773c8081b12917cef7419b2675943b0aa99429b62"
 )
 
 var GatewayRunCmd = &cli2.Command{
@@ -82,7 +84,7 @@ var GatewayRunCmd = &cli2.Command{
 			Name:    "memoep",
 			Aliases: []string{"m"},
 			Usage:   "memo chain endpoint",
-			Value:   "https://devchain.metamemo.one:8501",
+			Value:   "https://chain.metamemo.one:8501",
 		},
 	},
 	Action: func(cctx *cli2.Context) error {
@@ -278,6 +280,7 @@ func (l *lfsGateway) QueryPrice(ctx context.Context, bucket, size, time string) 
 
 	stime := new(big.Int)
 	stime.SetString(time, 10)
+	stime.Mul(stime, big.NewInt(86400))
 
 	if stime.Cmp(big.NewInt(86400)) < 0 {
 		return "", xerrors.New("Minimum storage time of 100 days")
@@ -578,15 +581,6 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 		return objInfo, err
 	}
 
-	// if bucket not exist, create bucket
-	err = l.memofs.MakeBucketWithLocation(ctx, bucket)
-	if err != nil {
-		err1 := minio.BucketAlreadyExists{Bucket: bucket, Object: object}
-		if err.Error() != err1.Error() {
-			return objInfo, err
-		}
-	}
-
 	signmsg := opts.UserDefined["X-Amz-Meta-Sign"]
 	log.Println(signmsg)
 
@@ -623,28 +617,26 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	}
 	pri := new(big.Int)
 	pri.SetString(price, 10)
-	sender := common.HexToAddress(bucket)
 
-	allowance, err := l.getAllowance(ctx, sender)
+	balance, err := l.GetBalanceInfo(ctx, bucket)
 	if err != nil {
 		l.memofs.DeleteObject(ctx, bucket, object)
 		return objInfo, err
 	}
 	log.Println("Price", price)
-	if allowance.Cmp(pri) < 0 {
-		log.Printf("allow: %d, price: %d, allowance not enough\n", allowance, pri)
+	log.Println("Balance", balance)
+	bal := new(big.Int)
+	bal.SetString(balance, 10)
+	if bal.Cmp(pri) < 0 {
+		log.Printf("allow: %d, price: %d, allowance not enough\n", bal, pri)
 		l.memofs.DeleteObject(ctx, bucket, object)
 		return objInfo, minio.ObjectValidationFailed{Bucket: bucket, Object: object}
 	}
 
-	ts, err := l.transfer(ctx, sender, pri)
-	if err != nil {
-		log.Println("transfer error ", err)
-		l.memofs.DeleteObject(ctx, bucket, object)
-		return objInfo, minio.ObjectValidationFailed{Bucket: bucket, Object: object}
-	}
+	to := common.HexToAddress(bucket)
 
-	if !l.sendTransaction(ctx, ts, "transfer") {
+	if !l.pay(ctx, to, etag, pri, size) {
+		log.Printf("pay error")
 		l.memofs.DeleteObject(ctx, bucket, object)
 		return objInfo, minio.ObjectValidationFailed{Bucket: bucket, Object: object}
 	}
@@ -684,33 +676,6 @@ func (l *lfsGateway) DeleteObjects(ctx context.Context, bucket string, objects [
 	}
 
 	return dobjects, errs
-}
-
-func (l *lfsGateway) GetBalanceInfo(ctx context.Context, address string) (string, error) {
-	addr := common.HexToAddress(address)
-	instanceAddr, endPoint := com.GetInsEndPointByChain("dev")
-	client, err := ethclient.DialContext(ctx, endPoint)
-	if err != nil {
-		return "", err
-	}
-
-	instanceIns, _ := inst.NewInstance(instanceAddr, client)
-	erc20Addr, err := instanceIns.Instances(&bind.CallOpts{From: com.AdminAddr}, com.TypeERC20)
-	if err != nil {
-		return "", err
-	}
-
-	erc20Ins, err := erc.NewERC20(erc20Addr, client)
-	if err != nil {
-		return "", err
-	}
-
-	bal, err := erc20Ins.BalanceOf(&bind.CallOpts{From: com.AdminAddr}, addr)
-	if err != nil {
-		return "", err
-	}
-
-	return bal.String(), nil
 }
 
 func (l lfsGateway) GetTokenAddress(ctx context.Context) (string, error) {
@@ -767,6 +732,48 @@ func (l lfsGateway) GetGatewayAddress(ctx context.Context) (string, error) {
 	return hex.EncodeToString(addr), nil
 }
 
+func (l *lfsGateway) GetBalanceInfo(ctx context.Context, address string) (string, error) {
+	err := l.getMemofs()
+	if err != nil {
+		return "", err
+	}
+	// if bucket not exist, create bucket
+	err = l.memofs.MakeBucketWithLocation(ctx, address)
+	if err != nil {
+		err1 := minio.BucketAlreadyExists{Bucket: address, Object: ""}
+		if err.Error() != err1.Error() {
+			return "", err
+		}
+	} else {
+		time.Sleep(60 * time.Second)
+	}
+
+	addr := common.HexToAddress(address)
+	instanceAddr, endPoint := com.GetInsEndPointByChain("product")
+	client, err := ethclient.DialContext(ctx, endPoint)
+	if err != nil {
+		return "", err
+	}
+
+	instanceIns, _ := inst.NewInstance(instanceAddr, client)
+	erc20Addr, err := instanceIns.Instances(&bind.CallOpts{From: com.AdminAddr}, com.TypeERC20)
+	if err != nil {
+		return "", err
+	}
+
+	erc20Ins, err := erc.NewERC20(erc20Addr, client)
+	if err != nil {
+		return "", err
+	}
+
+	bal, err := erc20Ins.BalanceOf(&bind.CallOpts{From: com.AdminAddr}, addr)
+	if err != nil {
+		return "", err
+	}
+
+	return bal.String(), nil
+}
+
 const transferTopic = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
 const approveTopic = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
 
@@ -813,6 +820,7 @@ func (l *lfsGateway) sendTransaction(ctx context.Context, signedTx *types.Transa
 		log.Println("no topics")
 		return false
 	}
+
 	var topic string
 	switch ttype {
 	case "transfer":
@@ -948,4 +956,65 @@ func (l *lfsGateway) transfer(ctx context.Context, sender common.Address, value 
 	}
 
 	return signedTx, nil
+}
+
+func (l *lfsGateway) pay(ctx context.Context, to common.Address, hashid string, amount *big.Int, size *big.Int) bool {
+	client, err := ethclient.Dial(ENDPOINT)
+	if err != nil {
+		return false
+	}
+	defer client.Close()
+
+	nonce, err := client.PendingNonceAt(ctx, GatewayAddr)
+	if err != nil {
+		return false
+	}
+
+	chainID, err := client.NetworkID(ctx)
+	if err != nil {
+		log.Println(err)
+		return false
+	}
+	log.Println("chainID: ", chainID)
+
+	taddr, err := l.GetTokenAddress(ctx)
+	if err != nil {
+		log.Println("ERROR: get token address error, err: ", err)
+		return false
+	}
+	tokenaddress := common.HexToAddress(taddr)
+
+	storeOrderPayFnSignature := []byte("storeOrderpay(address,string memory,uint256,uint256)")
+	hash := sha3.NewLegacyKeccak256()
+	hash.Write(storeOrderPayFnSignature)
+	methodID := hash.Sum(nil)[:4]
+
+	paddedAddress := common.LeftPadBytes(to.Bytes(), 32)
+	paddedAmount := common.LeftPadBytes(amount.Bytes(), 32)
+	paddedMd5 := common.LeftPadBytes([]byte(hashid), 32)
+	PaddedSize := common.LeftPadBytes(size.Bytes(), 32)
+
+	var data []byte
+	data = append(data, methodID...)
+	data = append(data, paddedAddress...)
+	data = append(data, paddedMd5...)
+	data = append(data, paddedAmount...)
+	data = append(data, PaddedSize...)
+
+	gasLimit := uint64(300000)
+	gasPrice := big.NewInt(1000)
+
+	tx := types.NewTransaction(nonce, tokenaddress, big.NewInt(0), gasLimit, gasPrice, data)
+
+	privateKey, err := crypto.HexToECDSA(GatewaySecretKey)
+	if err != nil {
+		return false
+	}
+
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privateKey)
+	if err != nil {
+		return false
+	}
+
+	return l.sendTransaction(ctx, signedTx, "storeOrderpay")
 }

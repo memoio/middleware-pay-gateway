@@ -361,9 +361,9 @@ require (
 )
 
 replace (
-	github.com/memoio/contractsv2 => /home/hekai/project/memov2-contractsv2
-	github.com/memoio/go-mefs-v2 => /home/hekai/project/go-mefs-v2
-	github.com/memoio/minio => /home/hekai/memo/minio
-	github.com/memoio/relay => /home/hekai/project/relay
-	memoc => /home/hekai/project/memo-go-contracts-v2
+	github.com/memoio/contractsv2 => ../memov2-contractsv2
+	github.com/memoio/go-mefs-v2 => ../go-mefs-v2
+	github.com/memoio/minio => ../minio
+	github.com/memoio/relay => ../relay
+	memoc => ../memo-go-contracts-v2
 )
