@@ -29,6 +29,7 @@ import (
 	mapi "github.com/memoio/go-mefs-v2/api"
 	mclient "github.com/memoio/go-mefs-v2/api/client"
 	"github.com/memoio/go-mefs-v2/lib/address"
+	"github.com/memoio/go-mefs-v2/lib/crypto/signature"
 	metag "github.com/memoio/go-mefs-v2/lib/utils/etag"
 	minio "github.com/memoio/minio/cmd"
 	"github.com/memoio/relay/lib/utils"
@@ -263,13 +264,16 @@ func (l *lfsGateway) IsEncryptionSupported() bool {
 func (l *lfsGateway) QueryPrice(ctx context.Context, bucket, size, time string) (string, error) {
 	err := l.getMemofs()
 	if err != nil {
-		return "", err
+		return "", minio.Memo{Message: fmt.Sprintf("connect error, %v", err)}
 	}
-
+	if time == "" {
+		time = "365"
+	}
 	price, err := l.memofs.QueryPrice(ctx)
 	if err != nil {
-		return "", err
+		return "", minio.Memo{Message: fmt.Sprintf("gateway get price error, %v", err)}
 	}
+	log.Println("QueryPrice", price, bucket, size, time)
 	pr := new(big.Int)
 	pr.SetString(price, 10)
 
@@ -281,16 +285,16 @@ func (l *lfsGateway) QueryPrice(ctx context.Context, bucket, size, time string) 
 	stime.Mul(stime, big.NewInt(86400))
 
 	if stime.Cmp(big.NewInt(86400)) < 0 {
-		return "", xerrors.New("Minimum storage time of 100 days")
+		return "", minio.Memo{Message: fmt.Sprintf("at least storage 100 days")}
 	}
 
 	bi, err := l.memofs.GetBucketInfo(ctx, bucket)
 	if err != nil {
-		return "", err
+		return "", minio.Memo{Message: fmt.Sprintf("get bucket info error %v", err)}
 	}
 
 	segment := new(big.Int)
-	segment.Mul(stime, big.NewInt(int64(bi.DataCount+bi.ParityCount)))
+	segment.Mul(ssize, big.NewInt(int64(bi.DataCount+bi.ParityCount)))
 
 	amount := new(big.Int)
 	amount.Mul(pr, stime)
@@ -580,11 +584,22 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	}
 
 	signmsg := opts.UserDefined["X-Amz-Meta-Sign"]
-	log.Println(signmsg)
-
+	log.Println("signmsg", signmsg)
 	date := opts.UserDefined["X-Amz-Meta-Date"]
 	if date == "" {
-		return objInfo, minio.ObjectValidationFailed{Bucket: bucket, Object: object}
+		date = "365"
+	}
+	maddr := common.HexToAddress(bucket)
+	vaddr, err := address.NewAddress(maddr.Bytes())
+	if err != nil {
+		return objInfo, minio.SignNotRight{}
+	}
+	signb, err := hex.DecodeString(signmsg)
+	if err != nil {
+		return objInfo, minio.SignNotRight{}
+	}
+	if !l.validAddress(ctx, vaddr, date, []byte(signb)) {
+		return objInfo, minio.SignNotRight{}
 	}
 
 	putOpts := miniogo.PutObjectOptions{
@@ -602,7 +617,7 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	}
 	moi, err := l.memofs.PutObject(ctx, bucket, object, r, opts.UserDefined)
 	if err != nil {
-		return objInfo, err
+		return objInfo, minio.Memo{Message: fmt.Sprintf("Gateway putobject error %s", err)}
 	}
 
 	etag, _ := metag.ToString(moi.ETag)
@@ -627,7 +642,7 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	if bal.Cmp(pri) < 0 {
 		log.Printf("allow: %d, price: %d, allowance not enough\n", bal, pri)
 		l.memofs.DeleteObject(ctx, bucket, object)
-		return objInfo, minio.ObjectValidationFailed{Bucket: bucket, Object: object}
+		return objInfo, minio.BalanceNotEnough{}
 	}
 
 	to := common.HexToAddress(bucket)
@@ -635,7 +650,7 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	if !l.pay(ctx, to, etag, pri, size) {
 		log.Printf("pay error")
 		l.memofs.DeleteObject(ctx, bucket, object)
-		return objInfo, minio.ObjectValidationFailed{Bucket: bucket, Object: object}
+		return objInfo, minio.PayNotComplete{}
 	}
 
 	oi := minio.ObjectInfo{
@@ -650,6 +665,8 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	if moi.UserDefined != nil {
 		oi.UserDefined = moi.UserDefined
 		oi.UserDefined["x-amz-meta-state"] = moi.State
+		oi.UserDefined["x-amz-meta-date"] = date
+		oi.UserDefined["x-memo-price"] = price
 	}
 
 	return oi, nil
@@ -1080,4 +1097,18 @@ func (l *lfsGateway) pay(ctx context.Context, to common.Address, hashid string, 
 	}
 
 	return l.sendTransaction(ctx, signedTx, "pay")
+}
+
+func (l *lfsGateway) validAddress(ctx context.Context, to address.Address, date string, sig []byte) bool {
+	ok, err := signature.Verify(to.Bytes(), []byte(date), sig)
+	if err != nil {
+		log.Println("verify error, ", err)
+		return false
+	}
+
+	if !ok {
+		log.Println("sign not right")
+		return false
+	}
+	return true
 }
