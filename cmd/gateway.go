@@ -23,13 +23,13 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	mapi "github.com/memoio/go-mefs-v2/api"
 	mclient "github.com/memoio/go-mefs-v2/api/client"
 	"github.com/memoio/go-mefs-v2/lib/address"
-	"github.com/memoio/go-mefs-v2/lib/crypto/signature"
 	metag "github.com/memoio/go-mefs-v2/lib/utils/etag"
 	minio "github.com/memoio/minio/cmd"
 	"github.com/memoio/relay/lib/utils"
@@ -589,16 +589,23 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	if date == "" {
 		date = "365"
 	}
-	maddr := common.HexToAddress(bucket)
-	vaddr, err := address.NewAddress(maddr.Bytes())
-	if err != nil {
-		return objInfo, minio.SignNotRight{}
+	prefix := []byte("\x19Ethereum Signed Message:\n")
+	slen := strconv.Itoa(len(date))
+
+	prefix = append(prefix, []byte(slen)...)
+	data := append(prefix, []byte(date)...)
+
+	log.Printf("data %s, len %d\n", data, len(date))
+
+	maddr := common.HexToAddress(strings.ToLower(bucket))
+	datehash := crypto.Keccak256Hash(data)
+	log.Printf("datahash %x", datehash.Bytes())
+	sig := hexutil.MustDecode(string(signmsg))
+	if sig[64] == 27 || sig[64] == 28 {
+		sig[64] -= 27
 	}
-	signb, err := hex.DecodeString(signmsg)
-	if err != nil {
-		return objInfo, minio.SignNotRight{}
-	}
-	if !l.validAddress(ctx, vaddr, date, []byte(signb)) {
+
+	if !l.validAddress(ctx, maddr, datehash.Bytes(), sig) {
 		return objInfo, minio.SignNotRight{}
 	}
 
@@ -1099,12 +1106,23 @@ func (l *lfsGateway) pay(ctx context.Context, to common.Address, hashid string, 
 	return l.sendTransaction(ctx, signedTx, "pay")
 }
 
-func (l *lfsGateway) validAddress(ctx context.Context, to address.Address, date string, sig []byte) bool {
-	ok, err := signature.Verify(to.Bytes(), []byte(date), sig)
+func (l *lfsGateway) validAddress(ctx context.Context, to common.Address, date, sig []byte) bool {
+	log.Printf("validAddress: %s %s, %x\n", to.Hex(), hexutil.Encode(sig), date)
+
+	sigPublicKeyECDSA, err := crypto.SigToPub(date, sig)
 	if err != nil {
-		log.Println("verify error, ", err)
+		log.Println(err)
 		return false
 	}
+	log.Println(crypto.PubkeyToAddress(*sigPublicKeyECDSA))
+	sigPublicKeyBytes := crypto.FromECDSAPub(sigPublicKeyECDSA)
+
+	if strings.Compare(to.Hex(), crypto.PubkeyToAddress(*sigPublicKeyECDSA).Hex()) != 0 {
+		log.Println(to.Hex(), crypto.PubkeyToAddress(*sigPublicKeyECDSA).String())
+		return false
+	}
+
+	ok := crypto.VerifySignature(sigPublicKeyBytes, []byte(date), sig[:len(sig)-1])
 
 	if !ok {
 		log.Println("sign not right")
