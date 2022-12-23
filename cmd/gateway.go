@@ -589,23 +589,15 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	if date == "" {
 		date = "365"
 	}
-	prefix := []byte("\x19Ethereum Signed Message:\n")
-	slen := strconv.Itoa(len(date))
-
-	prefix = append(prefix, []byte(slen)...)
-	data := append(prefix, []byte(date)...)
-
-	log.Printf("data %s, len %d\n", data, len(date))
-
 	maddr := common.HexToAddress(strings.ToLower(bucket))
-	datehash := crypto.Keccak256Hash(data)
-	log.Printf("datahash %x", datehash.Bytes())
+	datebyte := crypto.Keccak256([]byte(date))
+	log.Printf("datahash %x", datebyte)
 	sig := hexutil.MustDecode(string(signmsg))
 	if sig[64] == 27 || sig[64] == 28 {
 		sig[64] -= 27
 	}
 
-	if !l.validAddress(ctx, maddr, datehash.Bytes(), sig) {
+	if !l.validAddress(ctx, maddr, datebyte, sig) {
 		return objInfo, minio.SignNotRight{}
 	}
 
@@ -613,6 +605,17 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 		UserMetadata:         opts.UserDefined,
 		ServerSideEncryption: opts.ServerSideEncryption,
 		SendContentMd5:       true,
+	}
+
+	_, err = l.memofs.GetObjectInfo(ctx, bucket, object)
+	if err == nil {
+		mtime := time.Now().Format("20060102T150405")
+		suffix := path.Ext(object)
+		if len(suffix) > 0 && len(object) > len(suffix) {
+			object = object[:len(object)-len(suffix)] + "-" + mtime + suffix
+		} else {
+			object = object + "-" + mtime
+		}
 	}
 
 	contentType := putOpts.ContentType
@@ -659,6 +662,7 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 		l.memofs.DeleteObject(ctx, bucket, object)
 		return objInfo, minio.PayNotComplete{}
 	}
+	log.Println("complete upload ", bucket, object)
 
 	oi := minio.ObjectInfo{
 		Bucket:  bucket,
