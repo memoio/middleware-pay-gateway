@@ -261,50 +261,6 @@ func (l *lfsGateway) IsEncryptionSupported() bool {
 	return true
 }
 
-func (l *lfsGateway) QueryPrice(ctx context.Context, bucket, size, time string) (string, error) {
-	err := l.getMemofs()
-	if err != nil {
-		return "", minio.Memo{Message: fmt.Sprintf("connect error, %v", err)}
-	}
-	if time == "" {
-		time = "365"
-	}
-	price, err := l.memofs.QueryPrice(ctx)
-	if err != nil {
-		return "", minio.Memo{Message: fmt.Sprintf("gateway get price error, %v", err)}
-	}
-	log.Println("QueryPrice", price, bucket, size, time)
-	pr := new(big.Int)
-	pr.SetString(price, 10)
-
-	ssize := new(big.Int)
-	ssize.SetString(size, 10)
-
-	stime := new(big.Int)
-	stime.SetString(time, 10)
-	stime.Mul(stime, big.NewInt(86400))
-
-	if stime.Cmp(big.NewInt(86400)) < 0 {
-		return "", minio.Memo{Message: fmt.Sprintf("at least storage 100 days")}
-	}
-
-	bi, err := l.memofs.GetBucketInfo(ctx, bucket)
-	if err != nil {
-		return "", minio.Memo{Message: fmt.Sprintf("get bucket info error %v", err)}
-	}
-
-	segment := new(big.Int)
-	segment.Mul(ssize, big.NewInt(int64(bi.DataCount+bi.ParityCount)))
-
-	amount := new(big.Int)
-	amount.Mul(pr, stime)
-	amount.Mul(amount, segment)
-	amount.Div(amount, big.NewInt(248000))
-	amount.Div(amount, big.NewInt(int64(bi.DataCount)))
-
-	return amount.String(), nil
-}
-
 func (l *lfsGateway) StorageInfo(ctx context.Context) (si minio.StorageInfo, errs []error) {
 	//log.Println("get StorageInfo")
 	si.Backend.Type = madmin.Gateway
@@ -567,7 +523,7 @@ func (l *lfsGateway) GetObjectInfo(ctx context.Context, bucket, object string, o
 func (l *lfsGateway) GetObject(ctx context.Context, bucketName, objectName string, startOffset, length int64, writer io.Writer, etag string, o minio.ObjectOptions) error {
 	err := l.getMemofs()
 	if err != nil {
-		return err
+		return minio.LfsNotReady{}
 	}
 	err = l.memofs.GetObject(ctx, bucketName, objectName, startOffset, length, writer)
 	if err != nil {
@@ -580,7 +536,7 @@ func (l *lfsGateway) GetObject(ctx context.Context, bucketName, objectName strin
 func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
 	err = l.getMemofs()
 	if err != nil {
-		return objInfo, err
+		return objInfo, minio.LfsNotReady{}
 	}
 
 	signmsg := opts.UserDefined["X-Amz-Meta-Sign"]
@@ -627,7 +583,7 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	}
 	moi, err := l.memofs.PutObject(ctx, bucket, object, r, opts.UserDefined)
 	if err != nil {
-		return objInfo, minio.Memo{Message: fmt.Sprintf("Gateway putobject error %s", err)}
+		return objInfo, minio.LfsPutObject{}
 	}
 
 	etag, _ := metag.ToString(moi.ETag)
@@ -802,10 +758,56 @@ func (l lfsGateway) GetGatewayAddress(ctx context.Context) (string, error) {
 // 	return bal.String(), nil
 // }
 
+func (l *lfsGateway) QueryPrice(ctx context.Context, bucket, size, time string) (string, error) {
+	err := l.getMemofs()
+	if err != nil {
+		return "", minio.LfsNotReady{}
+	}
+
+	if time == "" {
+		time = "365"
+	}
+
+	price, err := l.memofs.QueryPrice(ctx)
+	if err != nil {
+		return "", minio.GetPrice{}
+	}
+	log.Println("QueryPrice", price, bucket, size, time)
+	pr := new(big.Int)
+	pr.SetString(price, 10)
+
+	ssize := new(big.Int)
+	ssize.SetString(size, 10)
+
+	stime := new(big.Int)
+	stime.SetString(time, 10)
+
+	if stime.Cmp(big.NewInt(365)) < 0 {
+		return "", minio.Memo{Message: fmt.Sprintf("at least storage 365 days")}
+	}
+	stime.Mul(stime, big.NewInt(86400))
+
+	bi, err := l.memofs.GetBucketInfo(ctx, bucket)
+	if err != nil {
+		return "", minio.Memo{Message: fmt.Sprintf("get bucket info error %v", err)}
+	}
+
+	segment := new(big.Int)
+	segment.Mul(ssize, big.NewInt(int64(bi.DataCount+bi.ParityCount)))
+
+	amount := new(big.Int)
+	amount.Mul(pr, stime)
+	amount.Mul(amount, segment)
+	amount.Div(amount, big.NewInt(248000))
+	amount.Div(amount, big.NewInt(int64(bi.DataCount)))
+
+	return amount.String(), nil
+}
+
 func (l *lfsGateway) GetBalanceInfo(ctx context.Context, address string) (string, error) {
 	err := l.getMemofs()
 	if err != nil {
-		return "", err
+		return "", minio.LfsNotReady{}
 	}
 	// if bucket not exist, create bucket
 	log.Println("GetBalanceInfo ", address)
@@ -823,7 +825,7 @@ func (l *lfsGateway) GetBalanceInfo(ctx context.Context, address string) (string
 	client, err := ethclient.DialContext(ctx, ENDPOINT)
 	if err != nil {
 		log.Println("connect to eth error", err)
-		return "", err
+		return "", minio.Memo{Message: fmt.Sprintf("connect to eth error %s", err)}
 	}
 
 	defer client.Close()
@@ -849,7 +851,7 @@ func (l *lfsGateway) GetBalanceInfo(ctx context.Context, address string) (string
 
 	result, err := client.CallContract(ctx, msg, nil)
 	if err != nil {
-		return "", err
+		return "", minio.Memo{Message: fmt.Sprintf("call contract error %s", err)}
 	}
 	bal := new(big.Int)
 	bal.SetBytes(result)
