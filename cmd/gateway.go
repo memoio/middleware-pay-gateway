@@ -545,15 +545,17 @@ func (l *lfsGateway) PutObject(ctx context.Context, bucket, object string, r *mi
 	if date == "" {
 		date = "365"
 	}
+
+	databyte := l.getsignmsg(ctx, bucket, object, opts.UserDefined)
+
 	maddr := common.HexToAddress(strings.ToLower(bucket))
-	datebyte := crypto.Keccak256([]byte(date))
-	log.Printf("datahash %x", datebyte)
+	log.Printf("datahash %x", databyte)
 	sig := hexutil.MustDecode(string(signmsg))
 	if sig[64] == 27 || sig[64] == 28 {
 		sig[64] -= 27
 	}
 
-	if !l.validAddress(ctx, maddr, datebyte, sig) {
+	if !l.validAddress(ctx, maddr, databyte, sig) {
 		return objInfo, minio.SignNotRight{}
 	}
 
@@ -819,7 +821,9 @@ func (l *lfsGateway) GetBalanceInfo(ctx context.Context, address string) (string
 		}
 	} else {
 		log.Println("create bucket ", address)
-		time.Sleep(20 * time.Second)
+		for !l.memofs.CheckBucket(ctx, address) {
+			time.Sleep(10 * time.Second)
+		}
 	}
 
 	client, err := ethclient.DialContext(ctx, ENDPOINT)
@@ -1112,15 +1116,13 @@ func (l *lfsGateway) pay(ctx context.Context, to common.Address, hashid string, 
 	return l.sendTransaction(ctx, signedTx, "pay")
 }
 
-func (l *lfsGateway) validAddress(ctx context.Context, to common.Address, date, sig []byte) bool {
-	log.Printf("validAddress: %s %s, %x\n", to.Hex(), hexutil.Encode(sig), date)
-
-	sigPublicKeyECDSA, err := crypto.SigToPub(date, sig)
+func (l *lfsGateway) validAddress(ctx context.Context, to common.Address, data, sig []byte) bool {
+	sigPublicKeyECDSA, err := crypto.SigToPub(data, sig)
 	if err != nil {
 		log.Println(err)
 		return false
 	}
-	log.Println(crypto.PubkeyToAddress(*sigPublicKeyECDSA))
+
 	sigPublicKeyBytes := crypto.FromECDSAPub(sigPublicKeyECDSA)
 
 	if strings.Compare(to.Hex(), crypto.PubkeyToAddress(*sigPublicKeyECDSA).Hex()) != 0 {
@@ -1128,11 +1130,36 @@ func (l *lfsGateway) validAddress(ctx context.Context, to common.Address, date, 
 		return false
 	}
 
-	ok := crypto.VerifySignature(sigPublicKeyBytes, []byte(date), sig[:len(sig)-1])
+	ok := crypto.VerifySignature(sigPublicKeyBytes, data, sig[:len(sig)-1])
 
 	if !ok {
 		log.Println("sign not right")
 		return false
 	}
 	return true
+}
+
+func (l *lfsGateway) getsignmsg(ctx context.Context, address, object string, userdefined map[string]string) []byte {
+	var datebyte []byte
+	version := userdefined["X-Amz-Meta-Version"]
+	filetime := userdefined["X-Amz-Meta-Time"]
+	filesize := userdefined["X-Amz-Meta-Filesize"]
+	date := userdefined["X-Amz-Meta-Date"]
+	if date == "" {
+		date = "365"
+	}
+	filename := object
+	switch version {
+	case "1":
+		log.Println("version 1")
+		message := "upload file signature!\nfileName: '%s'\nfileSize: %s\naddress: '%s'\ndateTime: '%s'"
+		data := fmt.Sprintf(message, filename, filesize, address, filetime)
+		fmt.Println(data)
+		datebyte = crypto.Keccak256([]byte(fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(data), data)))
+	default:
+		log.Println("version 0")
+		datebyte = crypto.Keccak256([]byte(date))
+	}
+
+	return datebyte
 }

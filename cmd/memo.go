@@ -344,6 +344,15 @@ func (m *MemoFs) WalletExport(ctx context.Context, addr address.Address) (*mtype
 	return napi.WalletExport(ctx, addr, "memoriae")
 }
 
+func (m *MemoFs) CheckBucket(ctx context.Context, address string) bool {
+	bi, err := m.GetBucketInfo(ctx, address)
+	if err != nil {
+		return false
+	}
+
+	return bi.Confirmed
+}
+
 func convertToMinioError(etype string, err error, bucket, object string) error {
 	switch etype {
 	case errService:
